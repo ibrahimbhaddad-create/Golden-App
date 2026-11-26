@@ -1,0 +1,103 @@
+# Deploys the background-alerts server (worker/) to Cloudflare Workers and
+# points the app at it by writing config.json.
+#
+# One-time setup — add two repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   (Cloudflare → My Profile → API Tokens → "Edit Cloudflare Workers" template)
+#   CLOUDFLARE_ACCOUNT_ID  (Cloudflare → Workers & Pages → Account ID on the right)
+# Then run this workflow from the Actions tab (or push a change under worker/).
+name: Deploy alerts server
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**", ".github/workflows/deploy-worker.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # commit config.json
+  pages: write # trigger a GitHub Pages rebuild
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        id: secrets
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$ACCOUNT" ]; then
+            echo "::warning::Add the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets to deploy the alerts server. Skipping."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.secrets.outputs.skip != '1'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install and test
+        if: steps.secrets.outputs.skip != '1'
+        working-directory: worker
+        run: |
+          npm ci
+          npm test
+
+      - name: Deploy to Cloudflare
+        id: deploy
+        if: steps.secrets.outputs.skip != '1'
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          npx wrangler deploy 2>&1 | tee deploy.log
+          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          if [ -z "$url" ]; then
+            echo "::error::Deploy finished but no workers.dev URL was printed. Open Cloudflare → Workers & Pages once to choose your workers.dev subdomain, then re-run this workflow."
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Health check
+        if: steps.secrets.outputs.skip != '1'
+        run: |
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "${{ steps.deploy.outputs.url }}/health"; then echo; exit 0; fi
+            sleep 10
+          done
+          echo "::error::The alerts server did not answer /health"
+          exit 1
+
+      - name: Point the app at the server
+        if: steps.secrets.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          printf '{\n  "pushServer": "%s"\n}\n' "$URL" > config.json
+          if git diff --quiet -- config.json; then
+            echo "config.json already points at $URL"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config.json
+          git commit -m "Point the app at the alerts server"
+          git push
+          # pushes made with GITHUB_TOKEN may not start a Pages build on their own
+          gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
+          echo "### Alerts server: $URL" >> "$GITHUB_STEP_SUMMARY"

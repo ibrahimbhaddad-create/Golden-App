@@ -190,7 +190,7 @@
       <div class="card">
         <h2>تنبيهاتي</h2>
         <ul id="alert-list" class="list"></ul>
-        <p class="muted small">تعمل التنبيهات أثناء فتح التطبيق، ويُفحص السعر كل 30 ثانية.</p>
+        <p class="muted small" id="alerts-mode">تعمل التنبيهات أثناء فتح التطبيق، ويُفحص السعر كل 30 ثانية.</p>
       </div>
     </section>
 
@@ -275,6 +275,16 @@
 
     <!-- ======================= الإعدادات ======================= -->
     <section id="tab-settings" class="tab">
+      <div class="card" id="bg-card">
+        <h2>تنبيهات بالخلفية <span class="badge" id="bg-badge" hidden>مفعّلة</span></h2>
+        <p class="muted small" id="bg-status">…</p>
+        <button id="bg-enable" class="btn btn-gold" type="button" hidden>تفعيل التنبيهات بالخلفية</button>
+        <div class="row" id="bg-actions" hidden>
+          <button id="bg-test" class="btn btn-ghost grow" type="button">إرسال إشعار تجريبي</button>
+          <button id="bg-disable" class="btn btn-ghost" type="button">إيقاف</button>
+        </div>
+      </div>
+
       <div class="card">
         <h2>العملة</h2>
         <select id="currency" class="input"></select>

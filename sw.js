@@ -1,5 +1,5 @@
 /* ذهب لايف — service worker: offline app shell. Prices are cached by the app in localStorage. */
-const VERSION = "v2";
+const VERSION = "v3";
 const CACHE = `gold-shell-${VERSION}`;
 const SHELL = [
   "./",
@@ -7,6 +7,7 @@ const SHELL = [
   "./styles.css",
   "./app.js",
   "./manifest.json",
+  "./config.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/apple-touch-icon.png",
@@ -48,6 +49,32 @@ self.addEventListener("fetch", (event) => {
         if (req.mode === "navigate") return caches.match("./index.html");
         return Response.error();
       }),
+  );
+});
+
+// Background alerts from the alerts server (Cloudflare Worker).
+self.addEventListener("push", (event) => {
+  let d = {};
+  try {
+    d = event.data ? event.data.json() : {};
+  } catch {
+    d = { title: "ذهب لايف", body: event.data ? event.data.text() : "" };
+  }
+  event.waitUntil(
+    Promise.all([
+      self.registration.showNotification(d.title || "ذهب لايف", {
+        body: d.body || "",
+        icon: "./icons/icon-192.png",
+        badge: "./icons/icon-192.png",
+        lang: "ar",
+        dir: "rtl",
+        tag: d.tag || undefined,
+        renotify: !!d.tag,
+        data: { url: "./" },
+      }),
+      // let an open app refresh its alert list
+      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((cs) => cs.forEach((c) => c.postMessage({ type: "pushed" }))),
+    ]),
   );
 });
 
