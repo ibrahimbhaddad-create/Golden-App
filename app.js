@@ -22,6 +22,8 @@
     settings: "gold.settings",
     tf: "gold.tf",
     histUnit: "gold.histUnit",
+    push: "gold.push",
+    config: "gold.config",
   };
 
   const ITEMS = [
@@ -172,6 +174,7 @@
       triggeredAt: a.triggeredAt || null,
       triggeredValue: isNum(a.triggeredValue) ? a.triggeredValue : null,
       lastFiredAt: a.lastFiredAt || null,
+      rearmedAt: a.rearmedAt || null,
       count: Number(a.count) || 0,
     };
   }
@@ -211,6 +214,8 @@
     loading: false,
     seriesFetchedAt: 0,
     editCurrency: null,
+    push: store.get(KEYS.push, null), // { server, id, token }
+    pushServer: store.get(KEYS.config, {})?.pushServer || "",
   };
   if (!["1h", "4h", "1d", "1w"].includes(state.tf)) state.tf = "1h";
 
@@ -790,7 +795,8 @@
     } catch {
       /* not supported (iOS) */
     }
-    if ("Notification" in window && Notification.permission === "granted") {
+    // With background alerts on, the server sends the system notification.
+    if (!bgActive() && "Notification" in window && Notification.permission === "granted") {
       try {
         const reg = await navigator.serviceWorker?.getRegistration();
         const opts = { body, icon: "./icons/icon-192.png", badge: "./icons/icon-192.png", lang: "ar", dir: "rtl", tag: "gold-alert-" + Date.now() };
@@ -858,10 +864,14 @@
     if (changed) {
       saveAlerts();
       renderAlerts();
+      scheduleSync();
     }
   }
 
   function renderAlerts() {
+    $("#alerts-mode").textContent = bgActive()
+      ? "التنبيهات بالخلفية مفعّلة: تصلك الإشعارات حتى لو كان التطبيق مغلقاً (يُفحص السعر كل دقيقة)."
+      : "تعمل التنبيهات أثناء فتح التطبيق، ويُفحص السعر كل 30 ثانية. فعّل «تنبيهات بالخلفية» من الإعدادات لتصلك والتطبيق مغلق.";
     const list = $("#alert-list");
     if (!state.alerts.length) {
       list.replaceChildren(h("li", { class: "empty" }, "لا توجد تنبيهات بعد."));
@@ -894,8 +904,10 @@
     a.triggeredAt = null;
     a.triggeredValue = null;
     a.lastFiredAt = null;
+    a.rearmedAt = new Date().toISOString();
     saveAlerts();
     renderAlerts();
+    scheduleSync();
     checkAlerts();
   }
 
@@ -904,6 +916,7 @@
     state.alerts = state.alerts.filter((x) => x.id !== id);
     saveAlerts();
     renderAlerts();
+    scheduleSync();
   }
 
   function alertFormKind() {
@@ -969,7 +982,8 @@
       saveAlerts();
       form.value.value = "";
       renderAlerts();
-      toast("تمت إضافة التنبيه", "سيُفحص مع كل تحديث للسعر.", "info", 3500);
+      toast("تمت إضافة التنبيه", bgActive() ? "سيصلك الإشعار حتى لو كان التطبيق مغلقاً." : "سيُفحص مع كل تحديث للسعر.", "info", 3500);
+      scheduleSync();
       checkAlerts();
     });
   }
@@ -1330,6 +1344,9 @@
       }
     });
 
+    $("#bg-enable").addEventListener("click", bgEnable);
+    $("#bg-disable").addEventListener("click", bgDisable);
+    $("#bg-test").addEventListener("click", bgTest);
     $("#export-btn").addEventListener("click", exportBackup);
     $("#import-file").addEventListener("change", importBackup);
   }
@@ -1377,9 +1394,200 @@
       saveSettings();
       renderSettings();
       rerenderAll();
+      scheduleSync();
       toast("تم الاستيراد", `${buys.length} عملية و${alerts.length} تنبيه`, "info", 3500);
     } catch {
       toast("ملف غير صالح", "اختر ملف نسخة احتياطية صدّرته من ذهب لايف.", "info", 4000);
+    }
+  }
+
+  // ------------------------------------------- background alerts (push) --
+  const bgActive = () => !!(state.push && state.pushServer && state.push.server === state.pushServer);
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const standalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+  async function loadConfig() {
+    try {
+      const res = await fetch("./config.json", { cache: "no-store" });
+      if (res.ok) {
+        const cfg = await res.json();
+        const server = typeof cfg.pushServer === "string" ? cfg.pushServer.trim().replace(/\/+$/, "") : "";
+        state.pushServer = /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(server) ? server : "";
+        store.set(KEYS.config, { pushServer: state.pushServer });
+      }
+    } catch {
+      /* offline: keep cached config */
+    }
+    renderBg();
+    renderAlerts();
+  }
+
+  async function api(path, body) {
+    const res = await fetch(state.pushServer + path, {
+      method: body ? "POST" : "GET",
+      headers: body ? { "content-type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
+    return data;
+  }
+
+  function renderBg() {
+    const st = $("#bg-status");
+    const show = (enable, actions) => {
+      $("#bg-enable").hidden = !enable;
+      $("#bg-actions").hidden = !actions;
+      $("#bg-badge").hidden = !actions;
+    };
+    if (!state.pushServer) {
+      st.textContent = "لم يتم ربط خادم التنبيهات بعد. بعد إعداده (شوف README) ستظهر هنا إمكانية التفعيل.";
+      return show(false, false);
+    }
+    if (bgActive()) {
+      st.textContent = "تصلك التنبيهات حتى لو كان التطبيق مغلقاً. الخادم يفحص السعر كل دقيقة.";
+      return show(false, true);
+    }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+      st.textContent = isIos && !standalone()
+        ? "على الآيفون: ثبّت التطبيق على الشاشة الرئيسية (مشاركة ← إضافة إلى الشاشة الرئيسية) ثم افتحه من الأيقونة لتفعيلها. يتطلب iOS 16.4 أو أحدث."
+        : "هذا المتصفح لا يدعم الإشعارات بالخلفية.";
+      return show(false, false);
+    }
+    if (Notification.permission === "denied") {
+      st.textContent = "الإشعارات محظورة. فعّلها من إعدادات الجهاز ← الإشعارات ← ذهب لايف، ثم ارجع هنا.";
+      return show(false, false);
+    }
+    st.textContent = "تصلك التنبيهات كإشعار حتى لو كان التطبيق مغلقاً أو الجوال مقفلاً.";
+    show(true, false);
+  }
+
+  function b64uToBytes(str) {
+    const s = str.replace(/-/g, "+").replace(/_/g, "/");
+    const bin = atob(s + "===".slice((s.length + 3) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  async function bgEnable() {
+    const btn = $("#bg-enable");
+    btn.disabled = true;
+    try {
+      unlockAudio();
+      const perm = await Notification.requestPermission(); // must run inside the tap
+      if (perm !== "granted") throw new Error(perm === "denied" ? "رُفض إذن الإشعارات" : "لم يتم منح الإذن");
+      const reg = (await navigator.serviceWorker.getRegistration()) || (await navigator.serviceWorker.register("./sw.js", { scope: "./" }));
+      await navigator.serviceWorker.ready;
+      const { publicKey } = await api("/vapid");
+      const key = b64uToBytes(publicKey);
+      let sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        const cur = sub.options?.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+        if (!cur || cur.length !== key.length || cur.some((b, i) => b !== key[i])) {
+          await sub.unsubscribe();
+          sub = null;
+        }
+      }
+      sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Riyadh";
+      const { id, token } = await api("/register", { subscription: sub.toJSON(), tz });
+      state.push = { server: state.pushServer, id, token };
+      store.set(KEYS.push, state.push);
+      await syncNow();
+      toast("تم تفعيل التنبيهات بالخلفية ✓", "ستصلك الإشعارات حتى لو كان التطبيق مغلقاً.", "info", 5000);
+    } catch (e) {
+      toast("تعذّر التفعيل", e?.message || "حاول مرة أخرى", "info", 6000);
+    } finally {
+      btn.disabled = false;
+      renderBg();
+      renderAlerts();
+      renderNotifSettings();
+    }
+  }
+
+  async function bgDisable() {
+    if (!confirm("إيقاف التنبيهات بالخلفية على هذا الجهاز؟")) return;
+    const p = state.push;
+    state.push = null;
+    store.set(KEYS.push, null);
+    try {
+      if (p) await api("/unregister", { id: p.id, token: p.token });
+    } catch {
+      /* server may be unreachable; local state is cleared anyway */
+    }
+    try {
+      const sub = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
+      await sub?.unsubscribe();
+    } catch {
+      /* ignore */
+    }
+    renderBg();
+    renderAlerts();
+  }
+
+  async function bgTest() {
+    if (!bgActive()) return;
+    try {
+      const r = await api("/test", { id: state.push.id, token: state.push.token });
+      toast(r.sent ? "أُرسل إشعار تجريبي" : "لم يصل الإشعار", r.sent ? "إذا لم يظهر، تأكد من السماح بالإشعارات." : "أعد التفعيل من جديد.", "info", 4000);
+    } catch (e) {
+      handleBgError(e);
+    }
+  }
+
+  function handleBgError(e) {
+    if (e?.status === 404) {
+      // server forgot this device (e.g. subscription expired)
+      state.push = null;
+      store.set(KEYS.push, null);
+      renderBg();
+      renderAlerts();
+      toast("انتهى اشتراك التنبيهات بالخلفية", "فعّلها من جديد من الإعدادات.", "info", 6000);
+    }
+  }
+
+  /** Copy firing state from the server where it acted more recently. */
+  function mergeRemote(remote) {
+    const byId = new Map((remote || []).map((a) => [a.id, a]));
+    const t = (v) => (v ? Date.parse(v) : 0);
+    let changed = false;
+    for (const a of state.alerts) {
+      const r = byId.get(a.id);
+      if (!r || t(r.lastFiredAt) <= Math.max(t(a.lastFiredAt), t(a.rearmedAt))) continue;
+      a.lastFiredAt = r.lastFiredAt;
+      a.triggeredAt = r.triggeredAt;
+      a.triggeredValue = r.triggeredValue;
+      a.count = Math.max(a.count, r.count || 0);
+      changed = true;
+    }
+    if (changed) {
+      saveAlerts();
+      renderAlerts();
+    }
+  }
+
+  let syncTimer = null;
+  function scheduleSync() {
+    if (!bgActive()) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(syncNow, 400);
+  }
+  async function syncNow() {
+    if (!bgActive()) return;
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Riyadh";
+      const r = await api("/sync", { id: state.push.id, token: state.push.token, alerts: state.alerts, tz });
+      mergeRemote(r.alerts);
+    } catch (e) {
+      handleBgError(e);
+    }
+  }
+  async function pullState() {
+    if (!bgActive() || !navigator.onLine) return;
+    try {
+      const r = await api("/state", { id: state.push.id, token: state.push.token });
+      mergeRemote(r.alerts);
+    } catch (e) {
+      handleBgError(e);
     }
   }
 
@@ -1392,7 +1600,10 @@
     store.set(KEYS.tab, name);
     window.scrollTo({ top: 0 });
     if (name === "home") renderChart();
-    if (name === "settings") renderNotifSettings();
+    if (name === "settings") {
+      renderNotifSettings();
+      renderBg();
+    }
   }
 
   // --------------------------------------------------------------- boot --
@@ -1432,9 +1643,15 @@
 
     // Show what we have immediately (works offline), then go to the network.
     rerenderAll();
+    renderBg();
     renderStatus();
     refreshAll(true);
     refreshHistory();
+    loadConfig().then(() => {
+      scheduleSync(); // push any changes made while offline
+    });
+    navigator.serviceWorker?.addEventListener("message", (e) => e.data?.type === "pushed" && pullState());
+    setInterval(() => document.visibilityState === "visible" && pullState(), 120_000);
 
     $("#refresh").addEventListener("click", () => refreshAll(true));
     setInterval(() => {
@@ -1446,6 +1663,7 @@
     setInterval(renderStatus, 10_000);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
+      pullState();
       const age = Date.now() - new Date(state.last?.fetchedAt || 0).getTime();
       if (age > REFRESH_MS - 5000) refreshAll();
     });

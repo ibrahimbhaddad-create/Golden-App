@@ -1,0 +1,21 @@
+# Cloudflare Worker for background price alerts.
+# Deployed automatically by .github/workflows/deploy-worker.yml
+name = "gold-alerts"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+ALLOWED_ORIGINS = "https://ibrahimbhaddad-create.github.io"
+VAPID_SUBJECT = "https://ibrahimbhaddad-create.github.io/Golden-App/"
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
