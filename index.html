@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ذهب لايف — أسعار الذهب</title>
+  <meta name="description" content="أسعار الذهب لحظياً بالريال السعودي مع تنبيهات وحساب أرباح المشتريات">
+  <meta name="theme-color" content="#0b0a08">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ذهب لايف">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="./icons/icon-192.png" alt="" width="30" height="30">
+      <span>ذهب لايف</span>
+    </div>
+    <span id="status" class="status" data-state="loading"><i></i><b>جارٍ التحميل</b></span>
+  </header>
+
+  <div id="offline-banner" class="banner" hidden>
+    لا يوجد اتصال — يُعرض آخر سعر محفوظ
+  </div>
+
+  <main>
+    <!-- ======================= الرئيسية ======================= -->
+    <section id="tab-home" class="tab" data-active="true">
+      <div class="card hero">
+        <div class="hero-row">
+          <span class="muted">سعر الأونصة</span>
+          <span id="change" class="change">—</span>
+        </div>
+        <div id="price-usd" class="big num">—</div>
+        <div class="hero-sub">
+          <span id="price-sar" class="num">—</span>
+          <span class="muted">ريال</span>
+        </div>
+        <div class="hero-foot">
+          <span class="muted">آخر تحديث: <span id="updated" class="num">—</span></span>
+          <button id="refresh" class="btn-icon" aria-label="تحديث">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+            <span>تحديث</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>سعر الجرام بالريال</h2>
+        <div id="karats" class="karats"></div>
+        <p class="note">السعر العالمي، لا يشمل المصنعية وضريبة القيمة المضافة</p>
+      </div>
+
+      <div class="card">
+        <div class="chart-head">
+          <h2>آخر 24 ساعة</h2>
+          <span id="chart-range" class="muted num small"></span>
+        </div>
+        <div id="chart" class="chart" role="img" aria-label="منحنى سعر الذهب لآخر 24 ساعة"></div>
+        <div id="chart-tip" class="chart-tip muted small">المس المنحنى لعرض السعر</div>
+      </div>
+    </section>
+
+    <!-- ======================= التنبيهات ======================= -->
+    <section id="tab-alerts" class="tab">
+      <div class="card">
+        <h2>تنبيه جديد</h2>
+        <form id="alert-form" class="form" novalidate>
+          <label class="field">
+            <span>العيار</span>
+            <select name="karat" class="input">
+              <option value="24">عيار 24</option>
+              <option value="22">عيار 22</option>
+              <option value="21" selected>عيار 21</option>
+              <option value="18">عيار 18</option>
+            </select>
+          </label>
+          <div class="seg" role="radiogroup" aria-label="الشرط">
+            <label><input type="radio" name="dir" value="above" checked><span>أعلى من</span></label>
+            <label><input type="radio" name="dir" value="below"><span>أقل من</span></label>
+          </div>
+          <label class="field">
+            <span>سعر الجرام (ريال)</span>
+            <input name="price" class="input num" inputmode="decimal" placeholder="مثال: 380" autocomplete="off">
+          </label>
+          <p id="alert-hint" class="muted small"></p>
+          <p id="alert-error" class="error" hidden></p>
+          <button class="btn btn-gold" type="submit">إضافة التنبيه</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>تنبيهاتي</h2>
+        <ul id="alert-list" class="list"></ul>
+        <p class="muted small">تعمل التنبيهات أثناء فتح التطبيق، ويُفحص السعر كل 30 ثانية.</p>
+        <button id="notif-btn" class="btn btn-ghost" type="button" hidden>تفعيل إشعارات النظام</button>
+      </div>
+    </section>
+
+    <!-- ======================= مشترياتي ======================= -->
+    <section id="tab-buys" class="tab">
+      <div class="card summary">
+        <h2>الإجمالي</h2>
+        <div class="sum-grid">
+          <div><span class="muted small">المدفوع</span><b id="sum-paid" class="num">—</b></div>
+          <div><span class="muted small">القيمة الحالية</span><b id="sum-value" class="num">—</b></div>
+        </div>
+        <div id="sum-pl" class="pl num">—</div>
+        <div id="sum-weights" class="muted small"></div>
+      </div>
+
+      <div class="card">
+        <h2 id="buy-title">إضافة عملية شراء</h2>
+        <form id="buy-form" class="form" novalidate>
+          <input type="hidden" name="editId">
+          <div class="grid2">
+            <label class="field">
+              <span>التاريخ</span>
+              <input name="date" type="date" class="input num">
+            </label>
+            <label class="field">
+              <span>العيار</span>
+              <select name="karat" class="input">
+                <option value="24">عيار 24</option>
+                <option value="22">عيار 22</option>
+                <option value="21" selected>عيار 21</option>
+                <option value="18">عيار 18</option>
+              </select>
+            </label>
+          </div>
+          <div class="grid2">
+            <label class="field">
+              <span>الوزن (جرام)</span>
+              <input name="weight" class="input num" inputmode="decimal" placeholder="10" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>المدفوع (ريال)</span>
+              <input name="paid" class="input num" inputmode="decimal" placeholder="4000" autocomplete="off">
+            </label>
+          </div>
+          <p id="buy-error" class="error" hidden></p>
+          <div class="row">
+            <button class="btn btn-gold grow" type="submit" id="buy-submit">حفظ</button>
+            <button class="btn btn-ghost" type="button" id="buy-cancel" hidden>إلغاء</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>العمليات</h2>
+        <ul id="buy-list" class="list"></ul>
+        <p class="note">القيمة الحالية محسوبة على السعر العالمي، لا تشمل المصنعية وضريبة القيمة المضافة</p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="التنقل">
+    <button data-tab="home" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+      <span>الأسعار</span>
+    </button>
+    <button data-tab="alerts">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16v-5a6 6 0 1 0-12 0v5l-2 2h16zM10 20a2 2 0 0 0 4 0"/></svg>
+      <span>التنبيهات</span>
+    </button>
+    <button data-tab="buys">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16l-1.5 12a2 2 0 0 1-2 1.8h-9a2 2 0 0 1-2-1.8z"/><path d="M9 7a3 3 0 0 1 6 0"/></svg>
+      <span>مشترياتي</span>
+    </button>
+  </nav>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
