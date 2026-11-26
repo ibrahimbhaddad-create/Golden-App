@@ -1,0 +1,40 @@
+{
+  "name": "golden-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:db": "bash scripts/test-db.sh",
+    "test:live": "NODE_USE_ENV_PROXY=1 LIVE=1 vitest run tests/live.test.ts",
+    "icons": "node scripts/gen-icons.cjs",
+    "vapid": "web-push generate-vapid-keys"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.119.2",
+    "lightweight-charts": "^5.3.0",
+    "next": "16.4.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "server-only": "^0.0.1",
+    "web-push": "^4.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/turbopack": "4.3.3",
+    "@types/node": "^22.20.7",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
+    "pg": "^8.23.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "^5",
+    "vitest": "^5.1.2"
+  }
+}
