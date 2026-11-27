@@ -1,5 +1,5 @@
 /* ذهب لايف — service worker: offline app shell. Prices are cached by the app in localStorage. */
-const VERSION = "v3";
+const VERSION = "v4";
 const CACHE = `gold-shell-${VERSION}`;
 const SHELL = [
   "./",
