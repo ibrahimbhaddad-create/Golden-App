@@ -73,6 +73,10 @@
           <span id="chart-range" class="muted num small"></span>
         </div>
         <div class="ranges" id="ranges" role="tablist" aria-label="الإطار الزمني">
+          <button data-tf="1s">ثانية</button>
+          <button data-tf="1m">دقيقة</button>
+          <button data-tf="5m">5 دقائق</button>
+          <button data-tf="15m">15 دقيقة</button>
           <button data-tf="1h">ساعة</button>
           <button data-tf="4h">4 ساعات</button>
           <button data-tf="1d">يوم</button>
@@ -81,6 +85,7 @@
         <div id="chart" class="chart" role="img" aria-label="شارت سعر الذهب"></div>
         <div id="chart-tip" class="chart-tip muted small">المس الشارت لعرض تفاصيل الشمعة</div>
         <div id="chart-stats" class="stats"></div>
+        <p id="chart-source" class="note"></p>
         <button id="tv-btn" class="btn btn-ghost tv-btn" type="button">شارت TradingView المتقدم (كل الفترات)</button>
         <div id="tv-box" class="tv-box" hidden></div>
       </div>
