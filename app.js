@@ -24,6 +24,8 @@
     histUnit: "gold.histUnit",
     push: "gold.push",
     config: "gold.config",
+    factor: "gold.factor",
+    kl: "gold.kl",
   };
 
   const ITEMS = [
@@ -217,7 +219,7 @@
     push: store.get(KEYS.push, null), // { server, id, token }
     pushServer: store.get(KEYS.config, {})?.pushServer || "",
   };
-  if (!["1h", "4h", "1d", "1w"].includes(state.tf)) state.tf = "1h";
+  if (!["1s", "1m", "5m", "15m", "1h", "4h", "1d", "1w"].includes(state.tf)) state.tf = "1m";
 
   const saveSettings = () => store.set(KEYS.settings, state.settings);
   const saveAlerts = () => store.set(KEYS.alerts, state.alerts);
@@ -278,12 +280,15 @@
         if (r > 0) rates[c.code] = r;
       }
       const prev = state.last?.price;
+      state.officialSpot = price;
+      calibrate(price, d);
       state.last = {
-        price,
+        price: liveActive() ? liveSpot() : price,
         silver: silver > 1 && silver < 2000 ? silver : state.last?.silver ?? null,
         rates: Object.keys(rates).length ? rates : state.last?.rates ?? {},
         asOf: d.price_as_of || d.updated_at || new Date().toISOString(),
         fetchedAt: new Date().toISOString(),
+        live: liveActive(),
       };
       state.online = true;
       store.set(KEYS.last, state.last);
@@ -383,6 +388,212 @@
     return out;
   }
 
+  // ------------------------------------------------------- live stream --
+  // Tick-by-tick price from gold-backed tokens (XAUT, PAXG — 1 token = 1 oz)
+  // on Binance's public market-data feed, scaled to the global spot price
+  // measured from xaus.com. Falls back to xaus.com polling if unavailable.
+  const BINANCE_REST = "https://data-api.binance.vision/api/v3";
+  const BINANCE_WS = "wss://data-stream.binance.vision/stream?streams=xautusdt@trade/paxgusdt@trade";
+  const TOKENS = ["XAUTUSDT", "PAXGUSDT"];
+  const KLINE_SYMBOL = "XAUTUSDT";
+  const LIVE_TF = {
+    "1s": { iv: "1s", sec: 1, limit: 300 },
+    "1m": { iv: "1m", sec: 60, limit: 300 },
+    "5m": { iv: "5m", sec: 300, limit: 300 },
+    "15m": { iv: "15m", sec: 900, limit: 300 },
+    "1h": { iv: "1h", sec: 3600, limit: 300 },
+    "4h": { iv: "4h", sec: 14400, limit: 300 },
+  };
+  const live = {
+    ws: null,
+    open: false,
+    retry: 0,
+    timer: null,
+    px: {}, // symbol -> { p, t }
+    factor: store.get(KEYS.factor, {}), // symbol -> spot / token price
+    kl: Object.fromEntries(Object.entries(store.get(KEYS.kl, {})).filter(([k, v]) => LIVE_TF[k] && Array.isArray(v))),
+    klAt: {},
+    klFailed: false,
+    renderTimer: null,
+    lastSlow: 0,
+    lastSave: 0,
+  };
+
+  /** Spot gold trading hours (New York): Sun 18:00 → Fri 17:00, daily break 17:00–18:00. */
+  function marketOpen(d = new Date()) {
+    const p = Object.fromEntries(
+      new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short", hour: "numeric", minute: "numeric", hourCycle: "h23" })
+        .formatToParts(d)
+        .map((x) => [x.type, x.value]),
+    );
+    const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(p.weekday);
+    const mins = Number(p.hour) * 60 + Number(p.minute);
+    if (wd === 6) return false;
+    if (wd === 5 && mins >= 17 * 60) return false;
+    if (wd === 0 && mins < 18 * 60) return false;
+    if (wd >= 1 && wd <= 4 && mins >= 17 * 60 && mins < 18 * 60) return false;
+    return true;
+  }
+
+  const fresh = (x, ms) => x && Date.now() - x.t < ms;
+  function liveSpot() {
+    let sum = 0;
+    let n = 0;
+    for (const s of TOKENS) {
+      const x = live.px[s];
+      const f = live.factor[s];
+      if (fresh(x, 5 * 60_000) && f) {
+        sum += x.p * f;
+        n++;
+      }
+    }
+    return n ? sum / n : null;
+  }
+  const liveActive = () => live.open && marketOpen() && liveSpot() != null && TOKENS.some((s) => fresh(live.px[s], 120_000));
+
+  /** Update token → spot factors from an official spot quote (smoothed). */
+  function calibrate(spot, d) {
+    const open = marketOpen();
+    for (const s of TOKENS) {
+      if (!open && live.factor[s]) continue; // spot is frozen while the market is closed
+      const tok = fresh(live.px[s], 120_000) ? live.px[s].p : Number(s === "XAUTUSDT" ? d?.xaut_usd : d?.paxg_usd);
+      if (!(tok > 0)) continue;
+      const f = spot / tok;
+      if (f < 0.95 || f > 1.05) continue; // ignore broken quotes
+      live.factor[s] = live.factor[s] ? live.factor[s] * 0.7 + f * 0.3 : f;
+    }
+    store.set(KEYS.factor, live.factor);
+  }
+
+  function connectLive() {
+    if (!("WebSocket" in window) || live.ws || document.visibilityState === "hidden") return;
+    let ws;
+    try {
+      ws = new WebSocket(BINANCE_WS);
+    } catch {
+      return;
+    }
+    live.ws = ws;
+    ws.onopen = () => {
+      live.open = true;
+      live.retry = 0;
+      renderStatus();
+    };
+    ws.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data)?.data;
+        if (d?.e === "trade") onTrade(d.s, Number(d.p), Number(d.T));
+      } catch {
+        /* ignore malformed frames */
+      }
+    };
+    ws.onclose = () => {
+      live.open = false;
+      live.ws = null;
+      renderStatus();
+      if (document.visibilityState === "visible") {
+        clearTimeout(live.timer);
+        live.timer = setTimeout(connectLive, Math.min(30_000, 1000 * 2 ** live.retry++));
+      }
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  function disconnectLive() {
+    clearTimeout(live.timer);
+    if (live.ws) {
+      const ws = live.ws;
+      live.ws = null;
+      ws.onclose = null;
+      ws.close();
+    }
+    live.open = false;
+  }
+
+  function onTrade(sym, p, t) {
+    if (!TOKENS.includes(sym) || !(p > 0) || !(t > 0)) return;
+    live.px[sym] = { p, t };
+    if (sym === KLINE_SYMBOL) {
+      for (const [tf, arr] of Object.entries(live.kl)) {
+        if (!arr.length) continue;
+        const sec = LIVE_TF[tf].sec;
+        const b = Math.floor(t / 1000 / sec) * sec;
+        const last = arr[arr.length - 1];
+        if (b === last.t) {
+          last.h = Math.max(last.h, p);
+          last.l = Math.min(last.l, p);
+          last.c = p;
+        } else if (b > last.t) {
+          arr.push({ t: b, o: p, h: p, l: p, c: p });
+          if (arr.length > 1200) arr.splice(0, arr.length - 1000);
+        }
+      }
+    }
+    scheduleLiveRender();
+  }
+
+  function scheduleLiveRender() {
+    if (live.renderTimer) return;
+    live.renderTimer = setTimeout(() => {
+      live.renderTimer = null;
+      if (document.visibilityState === "hidden") return;
+      if (liveActive()) {
+        const prev = state.last?.price;
+        state.last = { ...(state.last || {}), price: liveSpot(), fetchedAt: new Date().toISOString(), live: true };
+        renderPrices(prev);
+        checkAlerts();
+        const now = Date.now();
+        if (now - live.lastSlow > 2000) {
+          live.lastSlow = now;
+          renderBuys();
+          renderAlertHint();
+          renderCalc();
+          renderStatus();
+        }
+        if (now - live.lastSave > 10_000) {
+          live.lastSave = now;
+          store.set(KEYS.last, state.last);
+        }
+      } else if (LIVE_TF[state.tf]) {
+        renderChart();
+        renderHistoryTable();
+      }
+    }, 300);
+  }
+
+  async function fetchKlines(tf, force = false) {
+    const cfg = LIVE_TF[tf];
+    if (!cfg) return;
+    const maxAge = tf === "1s" ? 30_000 : 120_000;
+    if (!force && live.kl[tf]?.length && Date.now() - (live.klAt[tf] || 0) < maxAge) return;
+    try {
+      const rows = await getJSON(`${BINANCE_REST}/klines?symbol=${KLINE_SYMBOL}&interval=${cfg.iv}&limit=${cfg.limit}`, { timeout: 10_000, retries: 1 });
+      const cs = rows.map((k) => ({ t: k[0] / 1000, o: +k[1], h: +k[2], l: +k[3], c: +k[4] })).filter((k) => k.o > 0 && k.c > 0);
+      if (cs.length) {
+        live.kl[tf] = cs;
+        live.klAt[tf] = Date.now();
+        live.klFailed = false;
+        const keep = Object.fromEntries(Object.entries(live.kl).filter(([k]) => k !== "1s").map(([k, v]) => [k, v.slice(-300)]));
+        store.set(KEYS.kl, keep);
+      }
+    } catch {
+      live.klFailed = true;
+    }
+    if (state.tf === tf) {
+      renderChart();
+      renderHistoryTable();
+    }
+  }
+
+  /** Live-timeframe candles scaled to spot; xaus.com 5-minute samples as fallback. */
+  function liveCandles(tf) {
+    const raw = live.kl[tf] || [];
+    const f = live.factor[KLINE_SYMBOL] || 1;
+    if (raw.length) return raw.map((k) => ({ t: k.t, o: k.o * f, h: k.h * f, l: k.l * f, c: k.c * f }));
+    const sec = LIVE_TF[tf].sec;
+    return sec >= 300 ? intradayCandles(sec / 3600) : [];
+  }
+
   /** Daily candles (open = previous close), today's candle updated with the live price. */
   function dailyCandles() {
     const days = state.history?.days || [];
@@ -397,11 +608,13 @@
     if (live && out.length) {
       const todayUtc = new Date().toISOString().slice(0, 10);
       const last = out[out.length - 1];
-      if (last.d === todayUtc) {
+      const weekend = [0, 6].includes(new Date().getUTCDay());
+      // today's candle — or, over the weekend, Friday's candle closes at the latest official price
+      if (last.d === todayUtc || (weekend && last.d < todayUtc)) {
         last.c = live;
         last.h = Math.max(last.h, live);
         last.l = Math.min(last.l, live);
-      } else if (last.d < todayUtc && new Date().getUTCDay() % 6 !== 0) {
+      } else if (last.d < todayUtc) {
         out.push({ t: Date.parse(todayUtc + "T12:00:00Z") / 1000, d: todayUtc, o: last.c, h: Math.max(last.c, live), l: Math.min(last.c, live), c: live });
       }
     }
@@ -435,12 +648,28 @@
     const y = d.getUTCFullYear();
     return `${d.getUTCDate()}/${d.getUTCMonth() + 1}` + (y !== new Date().getFullYear() ? `/${String(y).slice(2)}` : "");
   };
+  const secFmt = new Intl.DateTimeFormat(ar, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  const dhm = (t) => {
+    const d = new Date(t * 1000);
+    return `${d.getDate()}/${d.getMonth() + 1} ${timeFmt.format(d)}`;
+  };
+  const tsec = (t) => secFmt.format(new Date(t * 1000));
+  const tmin = (t) => timeFmt.format(new Date(t * 1000));
   const TF = {
-    "1h": { name: "ساعة", candles: () => intradayCandles(1), show: 48, label: (t) => hourFmt.format(new Date(t * 1000)), tip: (t) => dayHourFmt.format(new Date(t * 1000)), row: hm },
-    "4h": { name: "4 ساعات", candles: () => intradayCandles(4), show: 12, label: hm, tip: (t) => dayHourFmt.format(new Date(t * 1000)), row: hm },
+    "1s": { name: "ثانية", candles: () => liveCandles("1s"), show: 120, label: tsec, tip: tsec, row: tsec },
+    "1m": { name: "دقيقة", candles: () => liveCandles("1m"), show: 90, label: tmin, tip: dhm, row: tmin },
+    "5m": { name: "5 دقائق", candles: () => liveCandles("5m"), show: 96, label: tmin, tip: dhm, row: dhm },
+    "15m": { name: "15 دقيقة", candles: () => liveCandles("15m"), show: 96, label: dhm, tip: dhm, row: dhm },
+    "1h": { name: "ساعة", candles: () => liveCandles("1h"), show: 72, label: hm, tip: (t) => dayHourFmt.format(new Date(t * 1000)), row: dhm },
+    "4h": { name: "4 ساعات", candles: () => liveCandles("4h"), show: 60, label: hm, tip: (t) => dayHourFmt.format(new Date(t * 1000)), row: dhm },
     "1d": { name: "يوم", candles: dailyCandles, show: 60, label: (t) => dayMonFmt.format(new Date(t * 1000)), tip: (t) => dateFmt.format(new Date(t * 1000)), row: dm },
     "1w": { name: "أسبوع", candles: weeklyCandles, show: 52, label: (t) => monYearFmt.format(new Date(t * 1000)), tip: (t) => "أسبوع " + dateFmt.format(new Date(t * 1000)), row: dm },
   };
+  function sourceNote(tf) {
+    if (!LIVE_TF[tf]) return "السعر العالمي من xaus.com — حتى 5 سنوات.";
+    if (!live.kl[tf]?.length) return LIVE_TF[tf].sec >= 300 ? "البث المباشر غير متاح الآن؛ الشموع من السعر العالمي كل 5 دقائق (آخر 48 ساعة)." : "";
+    return `لحظي من تداول XAUT (كل وحدة = أونصة ذهب) على Binance، معدّل على السعر العالمي.${marketOpen() ? "" : " السوق العالمي مغلق الآن، فالحركة من تداول XAUT فقط والسعر الرسمي ثابت على الإغلاق."}`;
+  }
 
   // -------------------------------------------------------------- home --
   function renderCurrencyNames() {
@@ -517,11 +746,11 @@
 
   function renderStatus() {
     const s = $("#status");
-    const fresh = state.last?.fetchedAt && Date.now() - new Date(state.last.fetchedAt).getTime() < 3 * REFRESH_MS;
-    const st = !state.online ? "offline" : fresh ? "live" : "loading";
+    const recent = state.last?.fetchedAt && Date.now() - new Date(state.last.fetchedAt).getTime() < 3 * REFRESH_MS;
+    const st = liveActive() ? "live" : !state.online && !live.open ? "offline" : !marketOpen() && state.last ? "closed" : recent ? "minute" : "loading";
     s.dataset.state = st;
-    s.querySelector("b").textContent = st === "live" ? "مباشر" : st === "offline" ? "غير متصل" : "جارٍ التحميل";
-    $("#offline-banner").hidden = state.online || !state.last;
+    s.querySelector("b").textContent = { live: "مباشر", offline: "غير متصل", closed: "السوق مغلق", minute: "كل دقيقة", loading: "جارٍ التحميل" }[st];
+    $("#offline-banner").hidden = state.online || live.open || !state.last;
   }
 
   // ------------------------------------------------------------- chart --
@@ -545,7 +774,10 @@
     box.replaceChildren();
     $("#chart-stats").replaceChildren();
     if (cs.length < 2) {
-      const msg = state.tf === "1d" || state.tf === "1w" ? (state.online ? "جارٍ تحميل البيانات التاريخية…" : "لا توجد بيانات تاريخية محفوظة") : state.online ? "جارٍ تحميل الشارت…" : "لا يوجد شارت محفوظ";
+      const msg = !LIVE_TF[state.tf]
+        ? state.online ? "جارٍ تحميل البيانات التاريخية…" : "لا توجد بيانات تاريخية محفوظة"
+        : live.klFailed ? "البث المباشر غير متاح الآن — جرّب إطار يوم أو أسبوع" : state.online ? "جارٍ تحميل الشارت…" : "لا يوجد شارت محفوظ";
+      $("#chart-source").textContent = sourceNote(state.tf);
       box.append(h("div", { class: "empty" }, msg));
       $("#chart-range").textContent = "";
       return;
@@ -646,10 +878,12 @@
     if (hst && (state.tf === "1d" || state.tf === "1w")) {
       if (hst.high_52w) stats.push(["أعلى / أدنى 52 أسبوع", `${fmt0.format(hst.high_52w)} / ${fmt0.format(hst.low_52w)}`]);
       if (hst.return_ytd_pct != null) stats.push(["منذ بداية السنة", signed(hst.return_ytd_pct, "%"), hst.return_ytd_pct >= 0 ? "up" : "down"]);
-    } else if (state.tf === "1h" || state.tf === "4h") {
-      stats.push(["البيانات المتاحة", "آخر 48 ساعة"]);
-      stats.push(["للفترات الأطول", "يوم / أسبوع أو TradingView"]);
+    } else if (LIVE_TF[state.tf]) {
+      const x = live.px[KLINE_SYMBOL];
+      stats.push(["آخر صفقة", x ? secFmt.format(new Date(x.t)) : "—"]);
+      stats.push(["السوق العالمي", marketOpen() ? "مفتوح" : "مغلق"]);
     }
+    $("#chart-source").textContent = sourceNote(state.tf);
     $("#chart-stats").replaceChildren(
       ...stats.map(([k, v, cls]) => h("div", {}, h("span", { class: "muted small" }, k), h("b", { class: `num ${cls || ""}` }, v))),
     );
@@ -675,10 +909,9 @@
     const conv = state.histUnit === "oz" ? (p) => p : (p) => (p / OZ) * ITEM[state.histUnit].purity * rate(c);
     const d = state.histUnit === "oz" ? 1 : curDigits(c);
     const rows = cs.slice().reverse().slice(0, state.histRows);
-    $("#hist-caption").textContent =
-      state.tf === "1h" || state.tf === "4h"
-        ? `شموع كل ${tf.name} — آخر 48 ساعة (الأحدث أولاً)`
-        : `شموع ${tf.name === "يوم" ? "يومية" : "أسبوعية (تاريخ بداية الأسبوع)"} — حتى 5 سنوات (الأحدث أولاً)`;
+    $("#hist-caption").textContent = LIVE_TF[state.tf]
+      ? `شموع كل ${tf.name} — تتحدّث لحظياً (الأحدث أولاً)`
+      : `شموع ${tf.name === "يوم" ? "يومية" : "أسبوعية (تاريخ بداية الأسبوع)"} — حتى 5 سنوات (الأحدث أولاً)`;
     const body = $("#hist-body");
     if (!rows.length) {
       body.replaceChildren(h("tr", {}, h("td", { colspan: "6", class: "muted" }, state.online ? "جارٍ التحميل…" : "لا توجد بيانات محفوظة")));
@@ -719,7 +952,7 @@
     }
     box.hidden = false;
     $("#tv-btn").textContent = "إخفاء شارت TradingView";
-    const interval = { "1h": "60", "4h": "240", "1d": "D", "1w": "W" }[state.tf];
+    const interval = { "1s": "1", "1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D", "1w": "W" }[state.tf];
     const widget = h("div", { class: "tradingview-widget-container__widget", style: "height:100%;width:100%" });
     const s = document.createElement("script");
     s.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
@@ -1628,6 +1861,7 @@
         renderChart();
         renderHistoryTable();
         if (state.tf === "1d" || state.tf === "1w") refreshHistory();
+        else fetchKlines(state.tf);
       }),
     );
     $("#hist-unit").addEventListener("change", (e) => {
@@ -1645,8 +1879,11 @@
     rerenderAll();
     renderBg();
     renderStatus();
+    connectLive();
     refreshAll(true);
     refreshHistory();
+    fetchKlines(state.tf, true);
+    setInterval(() => document.visibilityState === "visible" && LIVE_TF[state.tf] && fetchKlines(state.tf), 60_000);
     loadConfig().then(() => {
       scheduleSync(); // push any changes made while offline
     });
@@ -1662,7 +1899,12 @@
     }, REFRESH_MS);
     setInterval(renderStatus, 10_000);
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible") {
+        disconnectLive(); // iOS suspends hidden pages anyway
+        return;
+      }
+      connectLive();
+      if (LIVE_TF[state.tf]) fetchKlines(state.tf, true);
       pullState();
       const age = Date.now() - new Date(state.last?.fetchedAt || 0).getTime();
       if (age > REFRESH_MS - 5000) refreshAll();

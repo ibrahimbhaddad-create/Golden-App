@@ -345,3 +345,10 @@ table.hist { width: 100%; border-collapse: collapse; font-size: 0.74rem; }
 .buy-actions { justify-content: flex-start; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .buy-actions .mini { flex: 1; }
 #sum-pl { direction: rtl; }
+
+/* live status states */
+.status[data-state="closed"] { background: rgba(163, 154, 134, 0.14); color: var(--muted); }
+.status[data-state="closed"] i { background: var(--muted); }
+.status[data-state="minute"] { background: rgba(212, 175, 55, 0.12); color: var(--gold-soft); }
+.status[data-state="minute"] i { background: var(--gold); }
+#chart-source:empty { display: none; }

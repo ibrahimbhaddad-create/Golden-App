@@ -59,6 +59,9 @@ const server = http.createServer((req, res) => {
       route.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(body) });
     });
     await ctx.route("https://s3.tradingview.com/**", (r) => r.fulfill({ status: 200, contentType: "text/javascript", body: "/* stub */" }));
+    // the live stream has its own test (tests/live-e2e.cjs); keep this one on xaus.com only
+    await ctx.route("https://data-api.binance.vision/**", (r) => r.abort("connectionrefused"));
+    await ctx.routeWebSocket(/binance\.vision/, (ws) => ws.close());
   }
   const watch = (p) => {
     p.on("pageerror", (e) => errors.push(e.message));
@@ -113,7 +116,7 @@ const server = http.createServer((req, res) => {
   check(near(shop21, ((usd / OZ) * 0.875 * 3.75 + 20) * 1.15, 0.011), `21k shop estimate = (gram + 20 making) × 1.15 (${shop21})`);
   check(await page.isVisible("text=السعر العالمي، لا يشمل المصنعية وضريبة القيمة المضافة"), "VAT/making disclaimer");
   check((await page.locator("#change.up, #change.down").count()) === 1, `day change coloured (${await page.locator("#change").innerText()})`);
-  check((await page.locator("#status").getAttribute("data-state")) === "live", "status: live");
+  check(["minute", "closed"].includes(await page.locator("#status").getAttribute("data-state")), `status without live stream: ${await page.locator("#status").innerText()}`);
 
   // timeframes
   for (const [tf, min] of [["1h", 24], ["4h", 6], ["1d", 40], ["1w", 40]]) {
@@ -352,7 +355,7 @@ const server = http.createServer((req, res) => {
   check(man.start_url === "./" && man.scope === "./" && man.display === "standalone", "manifest relative + standalone");
   for (const i of man.icons) check((await fetch(new URL(i.src, BASE))).ok, `icon ${i.src}`);
   check(!/(href|src)="\/(?!\/)/.test(fs.readFileSync(path.join(ROOT, "index.html"), "utf8")), "no absolute paths");
-  const realErrors = errors.filter((e) => !/ERR_INTERNET_DISCONNECTED/.test(e));
+  const realErrors = errors.filter((e) => !/ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_REFUSED/.test(e)); // offline test + blocked Binance
   check(realErrors.length === 0, `no console errors ${realErrors.join(" | ")}`);
 
   await browser.close();
